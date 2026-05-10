@@ -1,9 +1,31 @@
 # Installation
-Install dependencies using pip install -r requirements.txt  
+Install dependencies using 
+```bash
+pip install -r requirements.txt
+``` 
 (preferably in a fresh python environment)
 
 # To reproduce plots from the paper
 Samples from PE runs for GW250114 and GW190521 are already available at zenodo.
-All the plotting routines for these events are included in the corresponding <event>.ipynb notebook.
-Also included are the plotting routines for the two simulations described in the paper.
+To reproduce the plots from the paper, download the zenodo data and use the event-specific jupyter notebook to plot the results.
+For instance, to get the results for the analysis of GW250114, download the GW250114 data and use `examples/GW250114.ipynb`.
+
+# Using the code
+Examples are provided in the examples directory in the form of jupyter notebooks.
+We provide three approaches to study ringdown
+1. Full-sky: Sky location is sampled from a uniform distritbution.
+2. Fixed-sky: Sky location is fixed to a `best estimate' from a prior inspiral-merger-ringdown analysis.
+3. Informed-sky: Sky location is sampled using posteriors from a previous inspiral-merger-ringdown analysis as the prior.
+
+The analyses using the three approaches are presented in separate directories.
+
+We analyze GW250114 and GW190521; jupyter notebooks for the same can be found in the respective directories.
+For instance, the full-sky analysis for GW250114 is presented in `examples/full-sky/GW250114.ipynb`.
+
+These notebooks were tested on macOS. You can tune CPU multi-threading performance by modifying the environment flags at the start of each notebook.
+
+```python
+os.environ["JAX_PLATFORM_NAME"] = "cpu"
+os.environ["XLA_FLAGS"] = "--xla_force_host_platform_device_count=12"
+```
 

@@ -5,6 +5,9 @@ pip install -r requirements.txt
 ``` 
 (preferably in a fresh python environment)
 
+# skyRing
+Contains code to include estimate sky location of sources directly from the ringdown gravitational wave signal, instead of fixing it to point estimates from inspiral-merger-ringdown (IMR) analysis. We present two approaches that do not require such fixes to point estimate - Full-sky and Informed-sky, alongwith the usual Fixed-sky method. See (arXiv:(link when available)) for more details. 
+
 # To reproduce plots from the paper
 Samples from PE runs for GW250114 and GW190521 are already available at zenodo ([10.5281/zenodo.20089761](https://doi.org/10.5281/zenodo.20089761))
 To reproduce the plots from the paper, download the zenodo data and use the `examples/plots.ipynb` jupyter notebook to plot the results.

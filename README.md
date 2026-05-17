@@ -7,8 +7,7 @@ pip install -r requirements.txt
 
 # To reproduce plots from the paper
 Samples from PE runs for GW250114 and GW190521 are already available at zenodo.
-To reproduce the plots from the paper, download the zenodo data and use the event-specific jupyter notebook to plot the results.
-For instance, to get the results for the analysis of GW250114, download the GW250114 data and use `examples/GW250114.ipynb`.
+To reproduce the plots from the paper, download the zenodo data and use the `examples/plots.ipynb` jupyter notebook to plot the results.
 
 # Using the code
 Examples are provided in the examples directory in the form of jupyter notebooks.

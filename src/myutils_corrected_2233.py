@@ -514,7 +514,7 @@ ln_likelihood_jit = jax.jit(
     ln_likelihood,
     static_argnames=(
         'T', 'srate',
-        'omega_22_r','omega_22_i','omega_33_r','omega_33_i'
+        'omega_22_r','omega_22_i','omega_33_r','omega_33_i', 'ref_det'
     )
 ) 
 
@@ -523,7 +523,7 @@ ln_likelihood_full_jit = jax.jit(
     ln_likelihood_full,
     static_argnames=(
         'gmst', 'T', 'srate',
-        'omega_22_r','omega_22_i','omega_33_r','omega_33_i'
+        'omega_22_r','omega_22_i','omega_33_r','omega_33_i', 'ref_det'
     )
 )
 

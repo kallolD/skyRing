@@ -2,10 +2,9 @@ import numpy as onp
 import jax, jax.numpy as jnp
 import lal
 from jax import random, vmap
-import matplotlib.pyplot as plt
+from scipy.linalg import toeplitz
 
 jax.config.update("jax_enable_x64", True) #double precision
-#reference_amplitude = jnp.asarray(1e-20, dtype=jnp.float64)
 reference_amplitude = jnp.asarray(1e-20, dtype=jnp.float64)
 
 MTSUN  = jnp.float64(lal.MTSUN_SI)
@@ -22,7 +21,6 @@ def _src_unit_ecef(ra, dec, gmst):
     Source direction (geocenter -> source) as a unit vector in ECEF.
     ra, dec, gmst in radians.
     """
-    # H = gmst - ra  # Greenwich hour angle
     H = ra - gmst  # Greenwich hour angle
     cosd = jnp.cos(dec)
     return jnp.stack([cosd * jnp.cos(H),   # x (lon=0, lat=0)
@@ -226,6 +224,28 @@ def load_tables(psd_H_path, psd_L_path, qnm1_path, qnm2_path):
 
     return psdH, psdL, omega_r, omega_i, omega_OT_r, omega_OT_i
 
+def cov_resp(srate, T, psdH, psdL, factor):
+    rhoH, rhoL = ACFs(srate=srate, T=T, psdH=psdH, psdL=psdL, factor=factor)
+    covH=toeplitz(rhoH)
+    covL=toeplitz(rhoL)
+    L_H=jnp.linalg.cholesky(covH)
+    L_L=jnp.linalg.cholesky(covL)
+
+    resp_H_py = lal.CachedDetectors[lal.LALDetectorIndexLHODIFF].response
+    resp_L_py = lal.CachedDetectors[lal.LALDetectorIndexLLODIFF].response
+    resp_H = jnp.asarray(resp_H_py, dtype=jnp.float64)
+    resp_L = jnp.asarray(resp_L_py, dtype=jnp.float64)
+    return L_H, L_L, resp_H, resp_L
+
+def initialize_det_locs():
+    H1 = lal.CachedDetectors[lal.LALDetectorIndexLHODIFF]
+    L1 = lal.CachedDetectors[lal.LALDetectorIndexLLODIFF]
+
+    rH = jnp.array([H1.location[0], H1.location[1], H1.location[2]], dtype=jnp.float64)
+    rL = jnp.array([L1.location[0], L1.location[1], L1.location[2]], dtype=jnp.float64)
+
+    return rH, rL
+
 def h22(t, f, gamma, A, fp, fc, swshlmp, swshlmn):
     amp_1, amp_2 = A, jnp.conj(A)
     #swshlmp = lal.SpinWeightedSphericalHarmonic(float(inclination), 0, -2, 2, 2) #float neeeded because inclination will be a jax array
@@ -313,186 +333,6 @@ def topk_1d(Hf, k):
     return idx, top_vals
 
 
-def simulate_one_par(params, psd1, psd2, L1, L2, omega_r, omega_i, omega_OT_r, omega_OT_i,
-                     Fp1, Fc1, Fp2, Fc2, key, num_noise_rel, swsh22p, swsh22m, swsh33p, swsh33m, T, srate, t0, i0, i1, freqs, fmin, components=None, factor=10.):
-    #freqs must be unsliced
-    M, chi, A220, P220, A221, P221 = jnp.asarray(params,dtype=jnp.float64)
-    prefactor_omega_r = (1./(2.*jnp.pi*M*MTSUN))
-    prefactor_omega_i = (1./(M*MTSUN))
-
-    A220 = A220*jnp.exp(1j*P220)*reference_amplitude
-    A221 = A221*jnp.exp(1j*P221)*reference_amplitude
-    A = jnp.array([A220, A221],dtype=jnp.complex128)
-
-    f = jnp.array([prefactor_omega_r*omega_r(chi), prefactor_omega_r*omega_OT_r(chi)],dtype=jnp.float64)
-    gamma = jnp.array([-prefactor_omega_i*omega_i(chi), -prefactor_omega_i*omega_OT_i(chi)],dtype=jnp.float64)
-
-    dt = jnp.asarray(1.0/srate, dtype=jnp.float64)
-    N = Ntime(srate=srate, T=T)
-    t  = jnp.arange(N, dtype=jnp.float64) * dt
- 
-    waveform1 = jnp.zeros(N, dtype=jnp.float64)
-    waveform2 = jnp.zeros(N, dtype=jnp.float64)
-    for j in range(A.shape[0]):
-        waveform1 = waveform1 + h22(t+t0, f[j], gamma[j], A[j], Fp1, Fc1, swsh22p, swsh22m)
-        waveform2 = waveform2 + h22(t+t0, f[j], gamma[j], A[j], Fp2, Fc2, swsh22p, swsh22m)
-
-    key1, key2 = random.split(key)
-    keys1 = random.split(key1, num_noise_rel)
-    keys2 = random.split(key2, num_noise_rel)
-
-    n1 = vmap(lambda k: noise(k, srate, T, fmin, psd_fn=psd1, factor=factor))(keys1)
-    n2 = vmap(lambda k: noise(k, srate, T, fmin, psd_fn=psd2, factor=factor))(keys2)
-    #lambda is just a shorthand for defining a function inline. vmap applies this function to each row of keys; output has shape (num_noise_rel, N)
-
-    Ht1 = n1 + waveform1[None, :] 
-    Ht2 = n2 + waveform2[None, :]
-
-    y1 = jax.scipy.linalg.solve_triangular(L1, Ht1.T, lower=True).T
-    y2 = jax.scipy.linalg.solve_triangular(L2, Ht2.T, lower=True).T
-
-    #for each row independently, take the rFFT along the time dimension
-    #Hf1 = dt * jnp.fft.rfft(Ht1, axis=1)
-    #Hf2 = dt * jnp.fft.rfft(Ht2, axis=1)
-    Hf1 = jnp.fft.rfft(y1, axis=1)/jnp.sqrt(N)
-    Hf2 = jnp.fft.rfft(y2, axis=1)/jnp.sqrt(N)
-
-    #df = freqs[1] - freqs[0]
-
-    #S1=psd1(freqs)
-    #S2=psd2(freqs)
-
-    #sigma1 = 0.5*jnp.sqrt(S1/df)
-    #sigma2 = 0.5*jnp.sqrt(S2/df)
-
-    #sigma1 = sigma1.at[0].multiply(jnp.sqrt(2.0))
-    #sigma2 = sigma2.at[0].multiply(jnp.sqrt(2.0))
-    #if N % 2 == 0:
-    #    sigma1 = sigma1.at[-1].multiply(jnp.sqrt(2.0))
-    #    sigma2 = sigma2.at[-1].multiply(jnp.sqrt(2.0))
-
-    #Hf1=Hf1/sigma1
-    #Hf2=Hf2/sigma2
-    
-    Hf1 = Hf1[:, i0:i1]
-    Hf2 = Hf2[:, i0:i1]
-
-    components = int(components) if components is not None else Hf1.shape[1]
-
-    idx1, Hf1_top = topk_per_row(Hf1, components)
-    idx2, Hf2_top = topk_per_row(Hf2, components)
-
-    # Normalize indices
-    idx1_norm = idx1.astype(jnp.float32) / Hf1.shape[1]
-    idx2_norm = idx2.astype(jnp.float32) / Hf2.shape[1]
-
-    Hout = jnp.concatenate(
-            [
-                idx1_norm,
-                jnp.abs(Hf1_top),
-                Hf1_top.real,
-                idx2_norm,
-                jnp.abs(Hf2_top),
-                Hf2_top.real
-            ],
-            axis=1
-    ).astype(jnp.float32) #going to single precision to save space and speed up training
-
-    Hout_t = jnp.concatenate([y1, y2],axis=1).astype(jnp.float32)
-
-    #return Hout  # (R, 6*components)
-    return Hout, Hout_t 
-
-
-def simulate_one_par_full(params, gmst, psdH, psdL, L_H, L_L, omega_r, omega_i, omega_OT_r, omega_OT_i, 
-        key, num_noise_rel, T, srate, t0, i0, i1, freqs, fmin, components=None, factor=10.):
-
-    p0 = params[:6]
-    cosiota, ra, cosdec, psi = params[6:]
-    iota = jnp.arccos(cosiota)
-    dec = jnp.arccos(cosdec)
-    FpH, FcH, FpL, FcL = patterns_for_params(ra, dec, psi, gmst)
-    swsh22p = sY_2_2(iota, 0.)
-    swsh22m  = sY_2_m2(iota, 0.)
-    swsh33p = sY_3_3(iota, 0.)
-    swsh33m = sY_3_m3(iota, 0.)
-
-
-    return simulate_one_par(p0, psdH, psdL, L_H, L_L, omega_r, 
-            omega_i, omega_OT_r, omega_OT_i, 
-            FpH, FcH, FpL, FcL, key, num_noise_rel, 
-            swsh22p, swsh22m, swsh33p, swsh33m, 
-            T, srate, t0, i0, i1, freqs, fmin, components, factor)
-
-
-def ln_likelihood_FD(data1, data2, params, psd1, psd2, omega_r, omega_i, omega_OT_r, omega_OT_i,
-                     Fp1, Fc1, Fp2, Fc2, swsh22p, swsh22m, swsh33p, swsh33m, T, srate, t0, i0, i1, freqs):
-    #freqs and data must be unsliced
-    M, chi, A220, P220, A221, P221 = jnp.asarray(params,dtype=jnp.float64)
-    prefactor_omega_r = (1./(2.*jnp.pi*M*MTSUN))
-    prefactor_omega_i = (1./(M*MTSUN))
-
-    A220 = A220*jnp.exp(1j*P220)*reference_amplitude
-    A221 = A221*jnp.exp(1j*P221)*reference_amplitude
-    A = jnp.array([A220, A221],dtype=jnp.complex128)
-
-    f = jnp.array([prefactor_omega_r*omega_r(chi), prefactor_omega_r*omega_OT_r(chi)],dtype=jnp.float64)
-    gamma = jnp.array([-prefactor_omega_i*omega_i(chi), -prefactor_omega_i*omega_OT_i(chi)],dtype=jnp.float64)
-
-    dt = jnp.asarray(1.0/srate, dtype=jnp.float64)
-    N = Ntime(srate=srate, T=T)
-    t  = jnp.arange(N, dtype=jnp.float64) * dt
-
-    waveform1 = jnp.zeros(N, dtype=jnp.float64)
-    waveform2 = jnp.zeros(N, dtype=jnp.float64)
-    for j in range(A.shape[0]):
-        waveform1 = waveform1 + h22(t+t0, f[j], gamma[j], A[j], Fp1, Fc1, swsh22p, swsh22m)
-        waveform2 = waveform2 + h22(t+t0, f[j], gamma[j], A[j], Fp2, Fc2, swsh22p, swsh22m)
-
-    Hf1 = dt * jnp.fft.rfft(waveform1)
-    Hf2 = dt * jnp.fft.rfft(waveform2)
-
-    df = freqs[1] - freqs[0]
-
-    if data1.shape[0] != Hf1.shape[0]:
-        data1 = data1[i0:i1]
-        jax.debug.print("Critical warning: shape mismatch: data1 {} vs Hf1 {}", data1.shape, Hf1.shape)
-    if data2.shape[0] != Hf2.shape[0]:
-        data2 = data2[i0:i1]
-        jax.debug.print("Critical warning: shape mismatch: data2 {} vs Hf2 {}", data2.shape, Hf2.shape)
-
-    diff1 = Hf1 - data1
-    diff2 = Hf2 - data2
-
-    S1=psd1(freqs)
-    S2=psd2(freqs)
-
-    sigma1 = 0.5*jnp.sqrt(S1/df)
-    sigma2 = 0.5*jnp.sqrt(S2/df)
-
-    sigma1 = sigma1.at[0].multiply(jnp.sqrt(2.0))
-    sigma2 = sigma2.at[0].multiply(jnp.sqrt(2.0))
-    if N % 2 == 0:
-        sigma1 = sigma1.at[-1].multiply(jnp.sqrt(2.0))
-        sigma2 = sigma2.at[-1].multiply(jnp.sqrt(2.0))
-    
-    loglikes = (
-            -0.5*(jnp.abs(diff1)**2/sigma1**2+jnp.abs(diff2)**2/sigma2**2)
-    )
-
-    #norm = -(jnp.log(2.0 * jnp.pi * (sigma1**2)) + jnp.log(2.0 * jnp.pi * (sigma2**2)))
-    #norm = norm.at[0].multiply(0.5)
-    #if N % 2 == 0:
-    #    norm = norm.at[-1].multiply(0.5)
-    #because at the boundaries you only have one Gaussian
-
-    loglikes=loglikes#+norm
-
-    loglikes = loglikes[i0:i1]
-    
-    return jnp.sum(loglikes).real #64 bit output
-
-
 def simulate_data(params, psd1, psd2, L1, L2, omega_r, omega_i, omega_OT_r, omega_OT_i,
                      Fp1, Fc1, Fp2, Fc2, key, swsh22p, swsh22m, swsh33p, swsh33m, T, srate, t0, i0, i1, freqs, fmin, components=None, factor=10.):
     #freqs must be unsliced
@@ -533,23 +373,6 @@ def simulate_data(params, psd1, psd2, L1, L2, omega_r, omega_i, omega_OT_r, omeg
     Hf1 = dt * jnp.fft.rfft(Ht1)
     Hf2 = dt * jnp.fft.rfft(Ht2)
 
-    #df = freqs[1] - freqs[0]
-
-    #S1=psd1(freqs)
-    #S2=psd2(freqs)
-
-    #sigma1 = 0.5*jnp.sqrt(S1/df)
-    #sigma2 = 0.5*jnp.sqrt(S2/df)
-    
-    #sigma1 = sigma1.at[0].multiply(jnp.sqrt(2.0))
-    #sigma2 = sigma2.at[0].multiply(jnp.sqrt(2.0))
-    #if N % 2 == 0:
-    #    sigma1 = sigma1.at[-1].multiply(jnp.sqrt(2.0))
-    #    sigma2 = sigma2.at[-1].multiply(jnp.sqrt(2.0))
-
-    #Hf1_whitened = Hf1/sigma1
-    #Hf2_whitened = Hf2/sigma2
-
     Hf1_whitened = Hf1_whitened[i0:i1]
     Hf2_whitened = Hf2_whitened[i0:i1]
     
@@ -572,7 +395,7 @@ def simulate_data(params, psd1, psd2, L1, L2, omega_r, omega_i, omega_OT_r, omeg
                 Hf2_top.real
             ],
             axis=0
-    ).astype(jnp.float32) #going to single precision to save space and speed up training
+    ).astype(jnp.float32)
 
     Hout_t = jnp.concatenate([y1, y2],axis=0).astype(jnp.float32) 
 
@@ -600,7 +423,7 @@ def simulate_data_full(params, gmst, psdH, psdL, L_H, L_L, omega_r, omega_i, ome
             T, srate, t0, i0, i1, freqs, fmin, components, factor)
 
 def ln_likelihood(data1, data2, params, L1, L2, omega_r, omega_i, omega_OT_r, omega_OT_i,
-                     Fp1, Fc1, Fp2, Fc2, swsh22p, swsh22m, swsh33p, swsh33m, T, srate, t0, t2_minus_t1):
+                     Fp1, Fc1, Fp2, Fc2, swsh22p, swsh22m, swsh33p, swsh33m, T, srate, t0, t2_minus_t1, ref_det):
 
     M, chi, A220, P220, A221, P221 = jnp.asarray(params,dtype=jnp.float64)
     prefactor_omega_r = (1./(2.*jnp.pi*M*MTSUN))
@@ -619,35 +442,28 @@ def ln_likelihood(data1, data2, params, L1, L2, omega_r, omega_i, omega_OT_r, om
 
     waveform1 = jnp.zeros(N, dtype=jnp.float64)
     waveform2 = jnp.zeros(N, dtype=jnp.float64)
-    for j in range(A.shape[0]):
-        waveform1 = waveform1 + h22(t+t0, f[j], gamma[j], A[j], Fp1, Fc1, swsh22p, swsh22m)
-        # waveform2 = waveform2 + h22(t+t0-t2_minus_t1, f[j], gamma[j], A[j]*jnp.exp(-gamma*(-t2_minus_t1)), Fp2, Fc2, swsh22p, swsh22m) #amplitude also compensated
-        waveform2 = waveform2 + h22(t+t0-t2_minus_t1, f[j], gamma[j], A[j], Fp2, Fc2, swsh22p, swsh22m) #amplitude also compensated
-    # print(t2_minus_t1)
-    # plt.plot(onp.array(waveform1), 'b')
-    # plt.plot(onp.array(data1), 'y--')
-    # plt.show()
-    # plt.plot(onp.array(waveform2), 'b')
-    # plt.plot(onp.array(data2), 'y--')
-    # plt.show()
+    if ref_det=='H1':
+        for j in range(A.shape[0]):
+            waveform1 = waveform1 + h22(t+t0, f[j], gamma[j], A[j], Fp1, Fc1, swsh22p, swsh22m)
+            waveform2 = waveform2 + h22(t+t0-t2_minus_t1, f[j], gamma[j], A[j], Fp2, Fc2, swsh22p, swsh22m)
+
+    elif ref_det=='L1':
+        for j in range(A.shape[0]):
+            waveform1 = waveform1 + h22(t+t0+t2_minus_t1, f[j], gamma[j], A[j], Fp1, Fc1, swsh22p, swsh22m)
+            waveform2 = waveform2 + h22(t+t0, f[j], gamma[j], A[j], Fp2, Fc2, swsh22p, swsh22m) 
+    else:
+        return ValueError("reference detector must be H1 or L1. V1 coming soon.")
+
     diff1 = waveform1 - data1
     diff2 = waveform2 - data2
 
     y1 = jax.scipy.linalg.solve_triangular(L1, jnp.asarray(diff1), lower=True)
     y2 = jax.scipy.linalg.solve_triangular(L2, jnp.asarray(diff2), lower=True)
 
-    #N1 = diff1.shape[0]
-    #N2 = diff2.shape[0]
-
-    #logdet1 = 2 * jnp.sum(jnp.log(jnp.diag(L1)))
-    #logdet2 = 2 * jnp.sum(jnp.log(jnp.diag(L2)))
-
-    return -0.5*(jnp.vdot(y1, y1).real+jnp.vdot(y2, y2).real 
-            #+ logdet1 + logdet2 + (N1+N2) * jnp.log(2.0 * jnp.pi)
-            )
+    return -0.5*(jnp.vdot(y1, y1).real+jnp.vdot(y2, y2).real)
 
 
-def ln_likelihood_full(dataH, dataL, params, gmst, L_H, L_L, omega_r, omega_i, omega_OT_r, omega_OT_i, T, srate, t0): 
+def ln_likelihood_full(dataH, dataL, params, gmst, L_H, L_L, omega_r, omega_i, omega_OT_r, omega_OT_i, T, srate, t0, ref_det='H1'): 
 
     p0 = params[:6]
     cosiota, ra, sindec, psi = params[6:]
@@ -663,7 +479,7 @@ def ln_likelihood_full(dataH, dataL, params, gmst, L_H, L_L, omega_r, omega_i, o
     t2_minus_t1 = dt_L1_minus_H1(ra, dec, gmst, _rL, _rH)
 
     return ln_likelihood(dataH, dataL, p0, L_H, L_L, omega_r, omega_i, omega_OT_r, omega_OT_i,
-            FpH, FcH, FpL, FcL, swsh22p, swsh22m, swsh33p, swsh33m, T, srate, t0, t2_minus_t1)
+            FpH, FcH, FpL, FcL, swsh22p, swsh22m, swsh33p, swsh33m, T, srate, t0, t2_minus_t1, ref_det=ref_det)
 
 
 simulate_data_jit = jax.jit(
@@ -684,39 +500,11 @@ simulate_data_full_jit = jax.jit(
     )
 )
 
-
-simulate_one_par_jit = jax.jit(
-    simulate_one_par,
-    static_argnames=(
-        'psd1','psd2','T', 'srate',
-        'omega_r','omega_i','omega_OT_r','omega_OT_i',
-        'i0', 'i1', 'components', 'num_noise_rel', 'factor'
-    )
-)
-
-simulate_one_par_full_jit = jax.jit(
-    simulate_one_par_full,
-    static_argnames=(
-        'gmst', 'psdH','psdL','T', 'srate',
-        'omega_r','omega_i','omega_OT_r','omega_OT_i',
-        'i0', 'i1', 'components', 'num_noise_rel', 'factor'
-    )
-)
-
-ln_likelihood_fd_jit = jax.jit(
-    ln_likelihood_FD,
-    static_argnames=(
-        'psd1','psd2','T', 'srate',
-        'omega_r','omega_i','omega_OT_r','omega_OT_i',
-        'i0', 'i1'
-    )
-)
-
 ln_likelihood_jit = jax.jit(
     ln_likelihood,
     static_argnames=(
         'T', 'srate',
-        'omega_r','omega_i','omega_OT_r','omega_OT_i'
+        'omega_r','omega_i','omega_OT_r','omega_OT_i', 'ref_det'
     )
 ) 
 
@@ -725,7 +513,7 @@ ln_likelihood_full_jit = jax.jit(
     ln_likelihood_full,
     static_argnames=(
         'gmst', 'T', 'srate',
-        'omega_r','omega_i','omega_OT_r','omega_OT_i'
+        'omega_r','omega_i','omega_OT_r','omega_OT_i', 'ref_det'
     )
 )
 

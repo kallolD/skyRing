@@ -1,6 +1,7 @@
 import jax, jax.numpy as jnp
 import numpy as onp
 import scipy.signal as sig
+from scipy.linalg import solve_triangular
 
 jax.config.update("jax_enable_x64", True) #double precision
 
@@ -158,3 +159,9 @@ def load_tables(qnm1_path, qnm2_path):
     omega_OT_i = interp1d_jax(jnp.asarray(berti_fit_data_OT[:,0],dtype=jnp.float64), jnp.asarray(berti_fit_data_OT[:,2],dtype=jnp.float64))
 
     return omega_r, omega_i, omega_OT_r, omega_OT_i
+
+
+def calculate_SNR(h_t_, L_):
+    y_ = solve_triangular(L_, h_t_, lower=True)
+    snr_ = onp.sqrt(onp.dot(y_, y_))
+    return snr_

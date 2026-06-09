@@ -10,7 +10,7 @@ pip install -r requirements.txt
 
 
 # To reproduce plots from the paper
-Samples from PE runs for GW250114 and GW190521 are already available at zenodo ([10.5281/zenodo.20089762](https://doi.org/10.5281/zenodo.20089762))
+Samples from PE runs for GW250114 and GW190521 are already available at zenodo ([10.5281/zenodo.20089761](https://doi.org/10.5281/zenodo.20089761))
 To reproduce the plots from the paper, download the zenodo data and use the `examples/plots.ipynb` jupyter notebook to plot the results.
 
 # Using the code

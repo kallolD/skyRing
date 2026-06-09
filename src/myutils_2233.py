@@ -92,12 +92,12 @@ def sY_2_m2(theta, phi):
     return pref * (1.0 - jnp.cos(theta))**2 * jnp.exp(-2j * phi)
 
 def sY_3_3(theta, phi):
-    pref = jnp.sqrt(7.0 / (512.0 * jnp.pi))
-    return pref * (1.0 + jnp.cos(theta))**3 * jnp.exp(3j * phi)
+    pref = jnp.sqrt(21.0 / (2.0 * jnp.pi))
+    return -pref * jnp.cos(theta/2)**5 * jnp.sin(theta/2) * jnp.exp(3j * phi)
 
 def sY_3_m3(theta, phi):
-    pref = jnp.sqrt(7.0 / (512.0 * jnp.pi))
-    return pref * (1.0 - jnp.cos(theta))**3 * jnp.exp(-3j * phi)
+    pref = jnp.sqrt(21.0 / (2.0 * jnp.pi))
+    return pref * jnp.cos(theta/2) * jnp.sin(theta/2)**5 * jnp.exp(-3j * phi)
 
 def initialize_det_resp():
 

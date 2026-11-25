@@ -34,6 +34,8 @@ sky samples. The `main` branch keeps the version of the first submission.
   quotes, from the data on Zenodo.
 - `examples/analysis.ipynb`: how to run Full-sky, Fixed-sky and Informed-sky analyses, with Virgo, at later start
   times, in detector-frame coordinates, and on a ringdown-only injection.
+- `examples/GW190521-step-by-step.ipynb`: the GW190521 Full-sky and Fixed-sky analysis written out step by step
+  with the library modules only (without `analysis.py`): data, windows, noise covariance, likelihoods, sampling, ln B.
 - `tests/smoke_test.py`: checks the likelihoods against the paper's runs (including H1-L1-V1), the injection SNRs,
   the detector-frame transforms, a short sampler run, and `plots.ipynb`.
 - `data/`: QNM frequency tables (l = 2, 3) and the PSDs of the ringdown-only injections.

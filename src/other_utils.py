@@ -1,7 +1,7 @@
 import jax, jax.numpy as jnp
 import numpy as onp
 import scipy.signal as sig
-from scipy.linalg import cholesky, toeplitz
+from scipy.linalg import solve_triangular, cholesky, toeplitz
 
 jax.config.update("jax_enable_x64", True) #double precision
 
@@ -144,6 +144,12 @@ def analysis_data(data, times, tstart, n_analyze):
     if tstart_idx + n_analyze > len(times):
         raise ValueError(f"analysis window of {n_analyze} samples from index {tstart_idx} exceeds the data ({len(times)} samples)")
     return times[tstart_idx : tstart_idx + n_analyze], data[tstart_idx : tstart_idx + n_analyze]
+
+
+def calculate_SNR(h_t_, L_):
+    y_ = solve_triangular(L_, h_t_, lower=True)
+    snr_ = onp.sqrt(onp.dot(y_, y_))
+    return snr_
 
 
 # ──────────────────────────────────────────────────────────────────────────────

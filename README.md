@@ -19,19 +19,23 @@ sky samples. The `main` branch keeps the version of the first submission.
 
 ## Contents
 - `src/analysis.py`: the setup of the paper's runs, without configuration files:
-  - GWOSC strain, conditioning and analysis windows;
+  - GWOSC strain, conditioning and analysis windows, for H1-L1 or H1-L1-V1;
   - noise covariance;
-  - Full-sky, Fixed-sky and Informed-sky likelihoods and their prior boxes;
-  - nested sampling.
+  - Full-sky, Fixed-sky and Informed-sky likelihoods and their prior boxes, in equatorial or detector-frame sky
+    coordinates;
+  - nested sampling;
+  - the noiseless ringdown-only injections of the appendix, with their optimal SNRs.
 - `src/waveform.py`: quasinormal-mode templates for any set of (l, m, n) modes, antenna patterns, inter-detector
-  delays, likelihoods, and optional detector-frame sky coordinates.
-- `src/other_utils.py`: data conditioning, time-domain autocorrelation and Cholesky factor, whitening check.
+  delays, two- and three-detector likelihoods, injection templates, and detector-frame sky coordinates.
+- `src/other_utils.py`: data conditioning, time-domain autocorrelation and Cholesky factor, optimal SNR.
 - `src/swsh.py`: spin-weighted spherical harmonics. `src/strain_cache.py`: GWOSC download with a local cache.
 - `src/plot_utils.py`: the paper's plots.
 - `examples/plots.ipynb`: reproduces the figures of the paper, and the Bayes factors and posterior-volume ratios it
   quotes, from the data on Zenodo.
-- `examples/analysis.ipynb`: how to run Full-sky, Fixed-sky and Informed-sky analyses.
-- `tests/smoke_test.py`: checks the likelihoods against the paper's runs, a short sampler run, and `plots.ipynb`.
+- `examples/analysis.ipynb`: how to run Full-sky, Fixed-sky and Informed-sky analyses, with Virgo, at later start
+  times, in detector-frame coordinates, and on a ringdown-only injection.
+- `tests/smoke_test.py`: checks the likelihoods against the paper's runs (including H1-L1-V1), the injection SNRs,
+  the detector-frame transforms, a short sampler run, and `plots.ipynb`.
 - `data/`: QNM frequency tables (l = 2, 3) and the PSDs of the ringdown-only injections.
 
 ## Installation
@@ -57,8 +61,8 @@ modes = ((2, 2, 0), (2, 2, 1))
 names, low, high = an.prior_box(setup, modes)
 result = an.run_nested(an.make_loglik(setup, modes), low, high, nlive=10_000)
 ```
-See `examples/analysis.ipynb` for Fixed-sky, Informed-sky, GW190521, later start times and detector-frame sky
-coordinates. With 10^4 live points, a Full-sky run takes about 35 minutes on a laptop (Apple M4).
+See `examples/analysis.ipynb` for Fixed-sky, Informed-sky, GW190521, Virgo (`detectors=("H1", "L1", "V1")`),
+later start times, detector-frame sky coordinates (`sky_frame="detector"`) and ringdown-only injections. With 10^4 live points, a Full-sky run takes about 35 minutes on a laptop (Apple M4).
 
 ## Tests
 ```bash

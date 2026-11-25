@@ -20,6 +20,9 @@ Informed-sky: build the Full-sky setup and marginalize its likelihood over IMR s
     loglik = an.make_informed_loglik(setup, modes, nodes, logw)
     names, low, high = an.prior_box(setup, modes, informed=True)   # no (ra, sin dec)
 
+Three detectors: setup_event(..., detectors=("H1", "L1", "V1")); make_loglik then uses the H1-L1-V1 likelihoods.
+Noiseless ringdown-only injections and their optimal SNRs (Appendix A): ringdown_injection(...).
+
 The event settings in EVENTS are those of the paper's runs.
 """
 
@@ -35,14 +38,14 @@ import numpyro.distributions as dist
 
 import waveform as wf
 from swsh import swsh
-from other_utils import bandpass_ds, analysis_data, td_acf, cholesky_from_acf, decode_termination
+from other_utils import bandpass_ds, analysis_data, td_acf, cholesky_from_acf, calculate_SNR, decode_termination
 from strain_cache import fetch_or_cache_strain
 
 jax.config.update("jax_enable_x64", True)
 numpyro.enable_x64()
 
 DATA_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "data")   # QNM tables
-DET_INDEX = {"H1": lal.LALDetectorIndexLHODIFF, "L1": lal.LALDetectorIndexLLODIFF}
+DET_INDEX = {"H1": lal.LALDetectorIndexLHODIFF, "L1": lal.LALDetectorIndexLLODIFF, "V1": lal.LALDetectorIndexVIRGODIFF}
 
 # Settings of the paper's runs. Start time: t_peak + start_tM * tM (GW250114) or t_start (GW190521), geocentric.
 # acf_centers: centres of the two 64 s off-source stretches used for the noise covariance (fixed for all start times).
@@ -73,8 +76,10 @@ def setup_event(event, sky="full", shift=0, cache_dir="strain_cache", detectors=
 
     sky = "full": one window per detector, all starting at the arrival time in the last detector (t_ref).
     sky = "fixed": each detector's window starts at its own arrival time for the fixed (ra, dec) of EVENTS.
-    Strain is read from (or written to) `cache_dir` via strain_cache.fetch_or_cache_strain.
+    detectors = ("H1", "L1") or ("H1", "L1", "V1"); with Virgo the last detector to see the signal (and so the
+    Full-sky reference) can be V1. Strain is read from (or written to) `cache_dir` via strain_cache.
     """
+    assert tuple(detectors) in (("H1", "L1"), ("H1", "L1", "V1")), detectors
     ev = EVENTS[event]
     ra, dec = ev["ra"], ev["dec"]
     tgps = start_time(event, shift)
@@ -110,12 +115,18 @@ def setup_event(event, sky="full", shift=0, cache_dir="strain_cache", detectors=
 
     # detector responses and locations used by the likelihoods
     resp = {ifo: jnp.asarray(lal.CachedDetectors[DET_INDEX[ifo]].response, dtype=jnp.float64) for ifo in detectors}
-    rH, rL = wf.initialize_det_locs()
-    wf.set_detector_locations(rH, rL)
-    wf.set_detectors(resp["H1"], resp["L1"])
+    if "V1" in detectors:
+        rH, rL, rV = wf.initialize_det_locs_hlv()
+        wf.set_detector_locations(rH, rL, rV)
+        wf.set_detectors(resp["H1"], resp["L1"], resp["V1"])
+    else:
+        rH, rL = wf.initialize_det_locs()
+        wf.set_detector_locations(rH, rL)
+        wf.set_detectors(resp["H1"], resp["L1"])
     log(f"{event} ({sky}-sky, shift {shift}): start {tgps:.6f}, ref detector {ref_det}, {n} samples at {srate} Hz")
-    return dict(event=event, sky=sky, shift=shift, tgps=tgps, gmst=gmst, ra=ra, dec=dec, t_arrival=t_arrival,
-                ref_det=ref_det, tref=tref, raw=raw, h_t=h_t, L=L, T=T, srate=srate, t0=t0, rH=rH, rL=rL)
+    return dict(event=event, sky=sky, shift=shift, detectors=tuple(detectors), tgps=tgps, gmst=gmst, ra=ra, dec=dec,
+                t_arrival=t_arrival, ref_det=ref_det, tref=tref, raw=raw, h_t=h_t, L=L, T=T, srate=srate, t0=t0,
+                rH=rH, rL=rL)
 
 
 def _swsh(l, m, iota):
@@ -147,19 +158,30 @@ def make_loglik(setup, modes, sky_frame="equatorial", data_dir=DATA_DIR):
     """
     Log-likelihood of a parameter vector (prior_box order), without the parameter-independent normalization.
     Full-sky: sky sampled, Livingston template shifted by the sky-dependent delay. Fixed-sky: sky fixed at
-    EVENTS[event] (ra, dec), windows pre-aligned to each detector's arrival time. Modes with the same overtone
+    EVENTS[event] (ra, dec), windows pre-aligned to each detector's arrival time. With V1 in the setup, the
+    three-detector likelihoods are used. Modes with the same overtone
     number are ordered by amplitude in the listed order (e.g. A330 <= A220).
     """
     modes = tuple(tuple(m) for m in modes)
     table = wf.load_qnm_table(data_dir, modes)
     H, Lv, LH, LL = setup["h_t"]["H1"], setup["h_t"]["L1"], setup["L"]["H1"], setup["L"]["L1"]
     gmst, T, srate, t0 = setup["gmst"], setup["T"], setup["srate"], setup["t0"]
+    hlv = "V1" in setup["h_t"]
+    if hlv:
+        V, LV = setup["h_t"]["V1"], setup["L"]["V1"]
     if setup["sky"] == "fixed":
         ra, dec = setup["ra"], setup["dec"]
+        if hlv:
+            return lambda th: wf.ln_likelihood_general_fixed_sky_hlv_prealigned_jit(
+                H, Lv, V, th, gmst, LH, LL, LV, table, modes, _swsh, ra, dec, T, srate, t0)
         return lambda th: wf.ln_likelihood_general_fixed_sky_prealigned_jit(
             H, Lv, th, gmst, LH, LL, table, modes, _swsh, ra, dec, T, srate, t0)
     ref = setup["ref_det"]
-    loglik = lambda th: wf.ln_likelihood_general_full_jit(H, Lv, th, gmst, LH, LL, table, modes, _swsh, T, srate, t0, ref)
+    if hlv:
+        loglik = lambda th: wf.ln_likelihood_general_full_hlv_jit(H, Lv, V, th, gmst, LH, LL, LV, table, modes, _swsh,
+                                                                 T, srate, t0, ref)
+    else:
+        loglik = lambda th: wf.ln_likelihood_general_full_jit(H, Lv, th, gmst, LH, LL, table, modes, _swsh, T, srate, t0, ref)
     if sky_frame == "detector":                       # sample (epsilon, cos kappa) about the H1-L1 baseline
         frame = wf.build_baseline_frame(setup["rH"], setup["rL"])
         return lambda th: loglik(wf.detframe_theta_to_equatorial(th, gmst, frame, modes))
@@ -184,6 +206,43 @@ def make_informed_loglik(setup, modes, nodes, logw, data_dir=DATA_DIR):
         th = jnp.broadcast_to(theta, (K, theta.shape[0]))
         return logsumexp(jax.vmap(loglik)(jnp.concatenate([th[:, :i_ra], nodes, th[:, i_ra:]], axis=1)) + logw)
     return loglike
+
+
+def ringdown_injection(theta, modes, ra, dec, psi, tgps, psd_files=None, T=0.2, srate=4096, t0=0.0, factor=10,
+                       data_dir=DATA_DIR):
+    """
+    Noiseless ringdown-only injection in H1 and L1 (Appendix A): the QNM signal of theta = [M, chi, (A, phi) per
+    mode, cos(iota)] from sky position (ra, dec) with polarization psi, at geocentric time tgps. The noise covariance
+    comes from the PSD files (default: data/PSDs, as in the paper's injections).
+
+    Returns {"full": setup, "fixed": setup} (usable with make_loglik; give the prior box explicitly) and
+    {"full": snr, "fixed": snr}, the optimal network SNRs. Full-sky: both windows start at the arrival time in the
+    last detector, so the first detector loses the start of its ringdown. Fixed-sky: each window starts at the
+    detector's own arrival time.
+    """
+    psd_files = psd_files or {ifo: os.path.join(DATA_DIR, "PSDs", f"PSD_{ifo}_GW250114.txt") for ifo in ("H1", "L1")}
+    modes = tuple(tuple(m) for m in modes)
+    psd = {ifo: wf.interp1d_jax(*onp.loadtxt(psd_files[ifo], unpack=True)[:2]) for ifo in ("H1", "L1")}
+    L_H, L_L, resp_H, resp_L = wf.cov_resp(srate=srate, T=T, psdH=psd["H1"], psdL=psd["L1"], factor=factor)
+    rH, rL = wf.initialize_det_locs()
+    wf.set_detectors(resp_H, resp_L)
+    wf.set_detector_locations(rH, rL)
+    gmst = float(lal.GreenwichMeanSiderealTime(lal.LIGOTimeGPS(tgps)))
+    dt_LH = float(wf.dt_L1_minus_H1(ra, dec, gmst, wf._rL, wf._rH))
+    ref_det = "H1" if dt_LH < 0 else "L1"                      # the last detector anchors the Full-sky windows
+    table = wf.load_qnm_table(data_dir, modes)
+    iota = onp.arccos(theta[2 + 2 * len(modes)])
+    sw = [jnp.stack([_swsh(l, s * m, iota) for l, m, n in modes]) for s in (1, -1)]
+    setups, snr = {}, {}
+    for sky, dt in (("full", dt_LH), ("fixed", 0.0)):
+        hH, hL = wf.simulate_ringdown_jit(jnp.asarray(theta[:2 + 2 * len(modes)]), table, modes,
+                                          *wf.patterns_for_params(ra, dec, psi, gmst), *sw, T, srate, t0, dt, ref_det)
+        hH, hL = onp.asarray(hH), onp.asarray(hL)
+        snr[sky] = float(onp.hypot(calculate_SNR(hH, onp.asarray(L_H)), calculate_SNR(hL, onp.asarray(L_L))))
+        setups[sky] = dict(event=None, sky=sky, detectors=("H1", "L1"), tgps=tgps, gmst=gmst, ra=ra, dec=dec,
+                           ref_det=ref_det, h_t={"H1": jnp.asarray(hH), "L1": jnp.asarray(hL)}, L={"H1": L_H, "L1": L_L},
+                           T=T, srate=srate, t0=t0, rH=rH, rL=rL)
+    return setups, snr
 
 
 def run_nested(loglik, low, high, nlive=10_000, seed=31567, max_samples=None, dlogZ=0.01, num_posterior=100_000,

@@ -1,5 +1,6 @@
 """
-Smoke test: the library reproduces the likelihoods of the paper's runs, a short nested-sampling run completes, and
+Smoke test: the library reproduces the likelihoods of the paper's runs (two detectors, and H1-L1-V1), the SNRs of
+the ringdown-only injections and the detector-frame transforms, a short nested-sampling run completes, and
 examples/plots.ipynb reproduces the paper's figures and quoted numbers from the Zenodo data.
 
     SKYRING_DATA=/path/to/posterior_files pytest -q tests/smoke_test.py
@@ -23,6 +24,7 @@ import pytest
 import jax.numpy as jnp
 
 import analysis as an
+import waveform as wf
 
 DATA = os.environ.get("SKYRING_DATA")
 needs_data = pytest.mark.skipif(not DATA, reason="set SKYRING_DATA to the unzipped Zenodo posterior_files folder")
@@ -52,7 +54,7 @@ def setups(strain_dir):
             for ev in ("GW250114", "GW190521") for sky in ("full", "fixed")}
 
 
-@pytest.mark.parametrize("case", [c for c in REFERENCE["cases"] if c["sky"] != "informed"],
+@pytest.mark.parametrize("case", [c for c in REFERENCE["cases"] if c["sky"] != "informed" and "detectors" not in c],
                          ids=lambda c: f"{c['event']}-{c['sky']}-{len(c['modes'])}modes")
 def test_likelihood_matches_paper_runs(case, setups):
     setup = setups[(case["event"], case["sky"])]
@@ -61,6 +63,39 @@ def test_likelihood_matches_paper_runs(case, setups):
     loglik = an.make_loglik(setup, case["modes"])
     for theta, expected in zip(case["theta"], case["lnL"]):
         assert float(loglik(jnp.asarray(theta))) == pytest.approx(expected, rel=1e-9)
+
+
+@pytest.mark.parametrize("case", [c for c in REFERENCE["cases"] if "detectors" in c], ids=lambda c: f"{c['event']}-HLV-{c['sky']}")
+def test_hlv_likelihood_matches_paper_code(case, strain_dir):
+    setup = an.setup_event(case["event"], sky=case["sky"], detectors=tuple(case["detectors"]), cache_dir=strain_dir,
+                           log=lambda *a, **k: None)
+    assert setup["ref_det"] == "V1" and an.prior_box(setup, case["modes"])[0] == case["names"]
+    loglik = an.make_loglik(setup, case["modes"])
+    for theta, expected in zip(case["theta"], case["lnL"]):
+        assert float(loglik(jnp.asarray(theta))) == pytest.approx(expected, rel=1e-9)
+
+
+@pytest.mark.parametrize("modes, theta, ra, dec, psi, tgps, snr", [
+    (((2, 2, 0), (2, 2, 1)), [72., 0.75, 0.5, 2.2, 0.8, 4.5, onp.cos(0.65)], 2.33, 0.19, 1.329, 1420878141.2379541,
+     {"fixed": 28.5, "full": 23.3}),
+    (((2, 2, 0), (3, 3, 0)), [300., 0.8, 0.7, 4.1, 0.17, 1.5, onp.cos(1.3)], 3.5, 0.73, 1.329, 1420888141.2379541,
+     {"fixed": 25.1, "full": 23.5})], ids=["GW250114-like", "GW190521-like"])
+def test_ringdown_injection_snrs(modes, theta, ra, dec, psi, tgps, snr):
+    """Network optimal SNRs of the ringdown-only injections quoted in Appendix A; ln L = 0 at the injected values."""
+    setups, got = an.ringdown_injection(onp.array(theta), modes, ra, dec, psi, tgps)
+    assert {k: round(v, 1) for k, v in got.items()} == snr
+    assert abs(float(an.make_loglik(setups["full"], modes)(jnp.asarray(theta + [ra, onp.sin(dec), psi])))) < 1e-20
+    assert abs(float(an.make_loglik(setups["fixed"], modes)(jnp.asarray(theta + [psi])))) < 1e-20
+
+
+def test_detector_frame_transforms():
+    rH, rL = wf.initialize_det_locs()
+    frame = wf.build_baseline_frame(rH, rL)
+    for ra, dec, gmst in ((2.33, 0.19, 1.2), (3.5, 0.73, 4.0), (0.3, -1.1, 2.5)):
+        cos_kappa, eps = wf.radec_to_kappa_eps(ra, dec, gmst, *frame)
+        ra2, dec2 = wf.kappa_eps_to_radec(cos_kappa, eps, gmst, *frame)
+        assert float(ra2) == pytest.approx(ra, abs=1e-12) and float(dec2) == pytest.approx(dec, abs=1e-12)
+        assert float(wf.dt_from_cos_kappa(cos_kappa, rH, rL)) == pytest.approx(float(wf.dt_L1_minus_H1(ra, dec, gmst, rL, rH)), abs=1e-15)
 
 
 @needs_data

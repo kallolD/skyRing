@@ -6,9 +6,11 @@ Public API
 load_qnm_table(data_dir, modes)          -> QNMTable
 h_lm(t, f, gamma, A, fp, fc, swsh_p, swsh_m, l)
 ln_likelihood_general_full(...)          Full-sky (also _jit variant)
-ln_likelihood_general_fixed_sky_prealigned(...)   Fixed-sky (also _jit variant)
-set_detectors(resp_H, resp_L)
-set_detector_locations(rH, rL)
+ln_likelihood_general_fixed_sky_prealigned(...)   Fixed-sky, per-detector windows (also _jit variant)
+simulate_ringdown(...)                   noiseless templates for injections (also _jit variant)
+cov_resp(srate, T, psdH, psdL, factor)  -> L_H, L_L, resp_H, resp_L   (covariance from a PSD)
+set_detectors(resp_H, resp_L, resp_V=None)
+set_detector_locations(rH, rL, rV=None)
 initialize_det_locs()                    -> rH, rL
 
 Optional detector-frame sky coordinates (see the section of that name below) --
@@ -16,7 +18,15 @@ sample (zenith kappa, azimuth epsilon) about a detector baseline instead of
 (ra, sin dec); the likelihoods are unchanged, convert before calling them:
     build_baseline_frame(r_ref, r_other)               -> b_hat, e1_hat, e2_hat
     kappa_eps_to_radec(cos_kappa, eps, gmst, *frame)   -> ra, dec
+    radec_to_kappa_eps(ra, dec, gmst, *frame)          -> cos_kappa, eps
+    dt_from_cos_kappa(cos_kappa, r_ref, r_other)       -> t_other - t_ref
     detframe_theta_to_equatorial(theta, gmst, frame, modes)
+
+Three-detector (H1, L1, V1) counterparts -- additive, same conventions as above:
+    initialize_det_locs_hlv()                        -> rH, rL, rV
+    patterns_for_params_hlv(ra, dec, psi, gmst)      -> FpH, FcH, FpL, FcL, FpV, FcV
+    ln_likelihood_general_full_hlv(...)               Full-sky (also _jit variant)
+    ln_likelihood_general_fixed_sky_hlv_prealigned(...)   Fixed-sky (also _jit variant)
 
 swsh_fn interface expected by the likelihoods:
     swsh_fn(l: int, m: int, iota: jax scalar) -> complex jax scalar
@@ -29,6 +39,7 @@ import os
 import numpy as onp
 import jax, jax.numpy as jnp
 import lal
+from scipy.linalg import toeplitz
 
 jax.config.update("jax_enable_x64", True)
 
@@ -43,20 +54,24 @@ C_SI  = jnp.float64(lal.C_SI)
 
 _det_H = None
 _det_L = None
+_det_V = None
 _rH    = None
 _rL    = None
+_rV    = None
 
 
-def set_detectors(resp_H, resp_L):
-    global _det_H, _det_L
+def set_detectors(resp_H, resp_L, resp_V=None):
+    global _det_H, _det_L, _det_V
     _det_H = resp_H
     _det_L = resp_L
+    _det_V = resp_V
 
 
-def set_detector_locations(rH, rL):
-    global _rH, _rL
+def set_detector_locations(rH, rL, rV=None):
+    global _rH, _rL, _rV
     _rH = rH
     _rL = rL
+    _rV = rV
 
 
 def initialize_det_locs():
@@ -65,6 +80,17 @@ def initialize_det_locs():
     rH = jnp.array([H1.location[0], H1.location[1], H1.location[2]], dtype=jnp.float64)
     rL = jnp.array([L1.location[0], L1.location[1], L1.location[2]], dtype=jnp.float64)
     return rH, rL
+
+
+def initialize_det_locs_hlv():
+    """Same as initialize_det_locs(), plus V1. Returns rH, rL, rV."""
+    H1 = lal.CachedDetectors[lal.LALDetectorIndexLHODIFF]
+    L1 = lal.CachedDetectors[lal.LALDetectorIndexLLODIFF]
+    V1 = lal.CachedDetectors[lal.LALDetectorIndexVIRGODIFF]
+    rH = jnp.array([H1.location[0], H1.location[1], H1.location[2]], dtype=jnp.float64)
+    rL = jnp.array([L1.location[0], L1.location[1], L1.location[2]], dtype=jnp.float64)
+    rV = jnp.array([V1.location[0], V1.location[1], V1.location[2]], dtype=jnp.float64)
+    return rH, rL, rV
 
 
 # ─── Utilities ────────────────────────────────────────────────────────────────
@@ -85,6 +111,38 @@ def interp1d_jax(xp, fp):
         w   = (x - x0) / (x1 - x0)
         return y0 * (1.0 - w) + y1 * w
     return _interp
+
+
+def _truncated_acf(srate, T, psd, factor):
+    """Single-detector truncated ACF, used by ACFs()."""
+    dt  = 1.0 / srate
+    NN  = Ntime(srate, factor * T)
+    N   = Ntime(srate, T)
+    freqs = jnp.fft.rfftfreq(NN, d=dt)
+    df  = freqs[1] - freqs[0]
+    rho = 0.5 * jnp.fft.irfft(psd(freqs)).real * df * NN
+    return rho[:N]
+
+
+def ACFs(srate, T, psdH, psdL, factor=10):
+    return _truncated_acf(srate, T, psdH, factor), _truncated_acf(srate, T, psdL, factor)
+
+
+def cov_resp(srate, T, psdH, psdL, factor):
+    """
+    Build Cholesky factors and detector response tensors.
+
+    Returns
+    -------
+    L_H, L_L   : Cholesky factors for whitening
+    resp_H, resp_L : (3,3) detector response tensors
+    """
+    rhoH, rhoL = ACFs(srate=srate, T=T, psdH=psdH, psdL=psdL, factor=factor)
+    L_H = jnp.linalg.cholesky(toeplitz(rhoH))
+    L_L = jnp.linalg.cholesky(toeplitz(rhoL))
+    resp_H = jnp.asarray(lal.CachedDetectors[lal.LALDetectorIndexLHODIFF].response, dtype=jnp.float64)
+    resp_L = jnp.asarray(lal.CachedDetectors[lal.LALDetectorIndexLLODIFF].response, dtype=jnp.float64)
+    return L_H, L_L, resp_H, resp_L
 
 
 # ─── Geometry ─────────────────────────────────────────────────────────────────
@@ -130,13 +188,20 @@ def patterns_for_params(ra, dec, psi, gmst):
     return FpH, FcH, FpL, FcL
 
 
+def patterns_for_params_hlv(ra, dec, psi, gmst):
+    FpH, FcH = antenna_pattern_jax(ra, dec, psi, gmst, _det_H)
+    FpL, FcL = antenna_pattern_jax(ra, dec, psi, gmst, _det_L)
+    FpV, FcV = antenna_pattern_jax(ra, dec, psi, gmst, _det_V)
+    return FpH, FcH, FpL, FcL, FpV, FcV
+
+
 # ─── Detector-frame sky coordinates ───────────────────────────────────────────
 #
 # Optional reparametrization of sky position, for the full-sky search. Instead of
 # (ra, sin dec), sample (zenith kappa, azimuth epsilon) relative to a detector
 # baseline: kappa is the angle from the baseline vector, epsilon the rotation
 # around it. The inter-detector arrival-time difference then depends on kappa
-# ALONE and is exactly independent of epsilon, so the
+# ALONE and is exactly independent of epsilon (see dt_from_cos_kappa), so the
 # light-travel-time degeneracy ring -- curved and diagonal in (ra, dec) -- becomes
 # a flat strip: narrow in kappa, free in epsilon.
 #
@@ -177,7 +242,7 @@ def build_baseline_frame(r_ref, r_other):
 
 def kappa_eps_to_radec(cos_kappa, eps, gmst, b_hat, e1_hat, e2_hat):
     """
-    (cos kappa, epsilon) -> (ra, dec).
+    (cos kappa, epsilon) -> (ra, dec). Exact inverse of radec_to_kappa_eps().
 
     Builds the ECEF source unit vector
         n_hat = sin(kappa)cos(eps) e1_hat + sin(kappa)sin(eps) e2_hat + cos(kappa) b_hat
@@ -196,6 +261,29 @@ def kappa_eps_to_radec(cos_kappa, eps, gmst, b_hat, e1_hat, e2_hat):
     return ra, dec
 
 
+def radec_to_kappa_eps(ra, dec, gmst, b_hat, e1_hat, e2_hat):
+    """
+    (ra, dec) -> (cos kappa, epsilon). Projects the source unit vector from
+    _src_unit_ecef() onto the baseline frame -- a different code path from
+    kappa_eps_to_radec()'s explicit construction, so round-tripping the two
+    genuinely tests the transform rather than algebraically undoing it.
+    """
+    n_hat     = _src_unit_ecef(ra, dec, gmst)
+    cos_kappa = jnp.clip(jnp.dot(n_hat, b_hat), -1., 1.)
+    eps       = jnp.mod(jnp.arctan2(jnp.dot(n_hat, e2_hat), jnp.dot(n_hat, e1_hat)), 2 * jnp.pi)
+    return cos_kappa, eps
+
+
+def dt_from_cos_kappa(cos_kappa, r_ref, r_other):
+    """
+    Closed form for t_other - t_ref given only cos kappa -- no epsilon dependence.
+    Equals dt_between(ra, dec, gmst, r_other, r_ref) for any (ra, dec) mapping to
+    that kappa; this identity is what makes the reparametrization worthwhile, and
+    is worth asserting against the unmodified dt_between() before trusting a run.
+    """
+    return -(jnp.linalg.norm(r_other - r_ref) / C_SI) * cos_kappa
+
+
 def detframe_theta_to_equatorial(theta, gmst, frame, modes):
     """
     Rotate a detector-frame parameter vector into the equatorial one the
@@ -205,7 +293,7 @@ def detframe_theta_to_equatorial(theta, gmst, frame, modes):
     with them replaced by (ra, sin dec), where offset = 2 + 2*len(modes) -- i.e.
     slots 7,8 for a 2-mode fit and 5,6 for a 1-mode fit. Every other entry is
     untouched, so the result is exactly the layout
-    ln_likelihood_general_full() documents:
+    ln_likelihood_general_full[_hlv]() documents:
         [M, chi, A_0, P_0, ..., cosiota, ra, sindec, psi]
 
     Parameters
@@ -327,6 +415,57 @@ def h_lm(t, f, gamma, A, fp, fc, swsh_p, swsh_m, l):
 
 # ─── Likelihoods ──────────────────────────────────────────────────────────────
 
+def simulate_ringdown(params, qnm_table, modes,
+                       Fp1, Fc1, Fp2, Fc2, swsh_p, swsh_m,
+                       T, srate, t0, t2_minus_t1, ref_det='H1'):
+    """
+    Generate noiseless ringdown waveforms for both detectors.
+
+    Same parameter layout and static-arg conventions as ln_likelihood_general.
+    Use for injections, forward-model checks, and SNR calculations.
+
+    Parameters
+    ----------
+    params : array [M, chi, A_0, P_0, ..., A_{K-1}, P_{K-1}]  (2 + 2K)
+    (all other args identical to ln_likelihood_general)
+
+    Returns
+    -------
+    waveform1, waveform2 : (N,) float64, time-domain strain at det1 and det2
+    """
+    params = jnp.asarray(params, dtype=jnp.float64)
+    M, chi = params[0], params[1]
+    prefactor_r = 1.0 / (2.0 * jnp.pi * M * MTSUN)
+    prefactor_i = 1.0 / (M * MTSUN)
+
+    N  = Ntime(srate, T)
+    dt = jnp.asarray(1.0 / srate, dtype=jnp.float64)
+    t  = jnp.arange(N, dtype=jnp.float64) * dt
+
+    waveform1 = jnp.zeros(N, dtype=jnp.float64)
+    waveform2 = jnp.zeros(N, dtype=jnp.float64)
+
+    for j, (l, m, n) in enumerate(modes):
+        omega_r_fn, omega_i_fn = qnm_table[(l, m, n)]
+        f     = prefactor_r * omega_r_fn(chi)
+        gamma = -prefactor_i * omega_i_fn(chi)
+        A     = params[2 + 2*j] * jnp.exp(1j * params[3 + 2*j]) * reference_amplitude
+
+        if ref_det == 'H1':
+            waveform1 += h_lm(t + t0,               f, gamma, A, Fp1, Fc1, swsh_p[j], swsh_m[j], l)
+            waveform2 += h_lm(t + t0 - t2_minus_t1, f, gamma, A, Fp2, Fc2, swsh_p[j], swsh_m[j], l)
+        else:
+            waveform1 += h_lm(t + t0 + t2_minus_t1, f, gamma, A, Fp1, Fc1, swsh_p[j], swsh_m[j], l)
+            waveform2 += h_lm(t + t0,               f, gamma, A, Fp2, Fc2, swsh_p[j], swsh_m[j], l)
+
+    return waveform1, waveform2
+
+
+simulate_ringdown_jit = jax.jit(
+    simulate_ringdown,
+    static_argnames=('qnm_table', 'modes', 'T', 'srate', 'ref_det'),
+)
+
 
 def _amplitude_hierarchy_log_constraint(params, modes):
     """
@@ -368,7 +507,7 @@ def ln_likelihood_general(data1, data2, params, L1, L2,
     params : array of length 2 + 2*K
         [M [M_sun], chi, A_0, P_0 [rad], A_1, P_1, ..., A_{K-1}, P_{K-1}]
         Amplitudes are dimensionless; internally scaled by reference_amplitude.
-    L1, L2 : (N,N) lower-triangular Cholesky factors of the noise covariance matrices.
+    L1, L2 : (N,N) lower-triangular Cholesky factors from cov_resp().
     qnm_table : QNMTable  **static for jit**
     modes : tuple of (l, m, n) tuples  **static for jit**
         Order must match the (A_j, P_j) pairs in params.
@@ -476,21 +615,125 @@ def ln_likelihood_general_full(dataH, dataL, params, gmst,
     )
 
 
+def ln_likelihood_general_hlv(data1, data2, data3, params, L1, L2, L3,
+                               qnm_table, modes,
+                               Fp1, Fc1, Fp2, Fc2, Fp3, Fc3,
+                               swsh_p, swsh_m,
+                               T, srate, t0, t2_minus_t1, t3_minus_t1, ref_det,
+                               skip_hierarchy=False):
+    """
+    Same as ln_likelihood_general(), for three detectors: "1"=H1, "2"=L1, "3"=V1.
+
+    Parameters
+    ----------
+    data1, data2, data3 : (N,) float64
+        Time-domain strain from detector 1 (H1), 2 (L1), 3 (V1).
+    L1, L2, L3 : (N,N) lower-triangular Cholesky factors of the noise covariance matrices.
+    Fp1, Fc1, Fp2, Fc2, Fp3, Fc3 : float64 scalars, antenna pattern values.
+    t2_minus_t1 : float, t_L1 - t_H1 [s].
+    t3_minus_t1 : float, t_V1 - t_H1 [s].
+    ref_det : 'H1', 'L1', or 'V1'  **static for jit**
+    (all other parameters as in ln_likelihood_general())
+
+    Returns
+    -------
+    float, log-likelihood = -0.5*sum_i(||y_i||^2) after whitening.
+    """
+    params = jnp.asarray(params, dtype=jnp.float64)
+    M, chi = params[0], params[1]
+    prefactor_r = 1.0 / (2.0 * jnp.pi * M * MTSUN)
+    prefactor_i = 1.0 / (M * MTSUN)
+
+    N  = Ntime(srate, T)
+    dt = jnp.asarray(1.0 / srate, dtype=jnp.float64)
+    t  = jnp.arange(N, dtype=jnp.float64) * dt
+
+    # Shift of each detector's template relative to whichever detector is the
+    # reference (the one whose window-anchor convention is used); the
+    # reference detector itself is unshifted.
+    if ref_det == 'H1':
+        shift1, shift2, shift3 = 0., t2_minus_t1, t3_minus_t1
+    elif ref_det == 'L1':
+        shift1, shift2, shift3 = -t2_minus_t1, 0., t3_minus_t1 - t2_minus_t1
+    elif ref_det == 'V1':
+        shift1, shift2, shift3 = -t3_minus_t1, t2_minus_t1 - t3_minus_t1, 0.
+    else:
+        raise ValueError("ref_det must be 'H1', 'L1', or 'V1'.")
+
+    waveform1 = jnp.zeros(N, dtype=jnp.float64)
+    waveform2 = jnp.zeros(N, dtype=jnp.float64)
+    waveform3 = jnp.zeros(N, dtype=jnp.float64)
+
+    for j, (l, m, n) in enumerate(modes):
+        omega_r_fn, omega_i_fn = qnm_table[(l, m, n)]
+        f     = prefactor_r * omega_r_fn(chi)
+        gamma = -prefactor_i * omega_i_fn(chi)          # positive: omega_i < 0 in data files
+        A     = params[2 + 2*j] * jnp.exp(1j * params[3 + 2*j]) * reference_amplitude
+
+        waveform1 += h_lm(t + t0 - shift1, f, gamma, A, Fp1, Fc1, swsh_p[j], swsh_m[j], l)
+        waveform2 += h_lm(t + t0 - shift2, f, gamma, A, Fp2, Fc2, swsh_p[j], swsh_m[j], l)
+        waveform3 += h_lm(t + t0 - shift3, f, gamma, A, Fp3, Fc3, swsh_p[j], swsh_m[j], l)
+
+    logl = jnp.asarray(0.0, dtype=jnp.float64)
+    for data_i, L_i, waveform_i in ((data1, L1, waveform1), (data2, L2, waveform2), (data3, L3, waveform3)):
+        y_i  = jax.scipy.linalg.solve_triangular(L_i, jnp.asarray(waveform_i - data_i), lower=True)
+        logl = logl - 0.5 * jnp.vdot(y_i, y_i).real
+
+    if not skip_hierarchy:
+        logl = logl + _amplitude_hierarchy_log_constraint(params, modes)
+
+    return logl
+
+
+def ln_likelihood_general_full_hlv(dataH, dataL, dataV, params, gmst,
+                                    L_H, L_L, L_V, qnm_table, modes, swsh_fn,
+                                    T, srate, t0, ref_det='H1',
+                                    skip_hierarchy=False):
+    """
+    Same as ln_likelihood_general_full(), for three detectors (H1, L1, V1).
+    Requires set_detectors()/set_detector_locations() to have been called with
+    all three responses/locations (e.g. via initialize_det_locs_hlv()).
+    """
+    n_modes = len(modes)
+    p0      = params[:2 + 2*n_modes]
+    offset  = 2 + 2*n_modes
+    cosiota, ra, sindec, psi = params[offset], params[offset+1], params[offset+2], params[offset+3]
+
+    iota = jnp.arccos(cosiota)
+    dec  = jnp.arcsin(sindec)
+
+    FpH, FcH, FpL, FcL, FpV, FcV = patterns_for_params_hlv(ra, dec, psi, gmst)
+    t2_minus_t1 = dt_L1_minus_H1(ra, dec, gmst, _rL, _rH)
+    t3_minus_t1 = dt_between(ra, dec, gmst, _rV, _rH)
+
+    swsh_p = jnp.stack([swsh_fn(l,  m, iota) for l, m, n in modes])
+    swsh_m = jnp.stack([swsh_fn(l, -m, iota) for l, m, n in modes])
+
+    return ln_likelihood_general_hlv(
+        dataH, dataL, dataV, p0, L_H, L_L, L_V,
+        qnm_table, modes,
+        FpH, FcH, FpL, FcL, FpV, FcV,
+        swsh_p, swsh_m,
+        T, srate, t0, t2_minus_t1, t3_minus_t1, ref_det,
+        skip_hierarchy=skip_hierarchy,
+    )
+
+
 # ─── Pre-aligned likelihoods (no inter-detector template shift) ───────────────
 #
-# ln_likelihood_general() and ln_likelihood_general_full() above (Full-sky) assume
-# data1/data2 were sliced from one SHARED reference window (anchored to ref_det's
-# own arrival time), and they compensate by shifting the non-ref detector's
-# template by the analytic inter-detector delay (t2_minus_t1). The functions
-# below (Fixed-sky) are for the other, equally valid convention: data1/data2
-# were each ALREADY sliced starting at that detector's own individually-computed
-# true arrival time -- possible whenever the sky location is known, since then
-# each detector's arrival time is exactly computable up front. In that case the
-# delay is already absorbed by the per-detector windowing, so no template shift
-# should be applied -- applying both conventions at once double-counts the delay.
-# Use the shared-window likelihoods with data cut at a shared tref/ref_det, or the
-# _prealigned ones with data cut per-detector at its own arrival time -- never mix
-# the two.
+# ln_likelihood_general[_hlv]() and ln_likelihood_general_full[_hlv]() above (Full-sky) assume
+# data1/data2[/data3] were sliced from one SHARED reference window (anchored to
+# ref_det's own arrival time), and they compensate by shifting the non-ref
+# detector(s)' template by the analytic inter-detector delay (t2_minus_t1 /
+# t3_minus_t1). The functions below are for the other, equally valid
+# convention: data1/data2[/data3] were each ALREADY sliced starting at that
+# detector's own individually-computed true arrival time -- possible whenever
+# the sky location is known, since then each detector's arrival time is exactly
+# computable up front. In that case the delay is already absorbed by the
+# per-detector windowing, so no template shift should be applied -- applying
+# both conventions at once double-counts the delay. Use ln_likelihood_general*
+# with data cut at a shared tref/ref_det, or ln_likelihood_general*_prealigned
+# with data cut per-detector at its own arrival time -- never mix the two.
 
 def ln_likelihood_general_prealigned(data1, data2, params, L1, L2,
                                       qnm_table, modes,
@@ -511,7 +754,7 @@ def ln_likelihood_general_prealigned(data1, data2, params, L1, L2,
         its own true arrival time.
     params : array of length 2 + 2*K
         [M [M_sun], chi, A_0, P_0 [rad], A_1, P_1, ..., A_{K-1}, P_{K-1}]
-    L1, L2 : (N,N) lower-triangular Cholesky factors of the noise covariance matrices.
+    L1, L2 : (N,N) lower-triangular Cholesky factors from cov_resp().
     qnm_table : QNMTable  **static for jit**
     modes : tuple of (l, m, n) tuples  **static for jit**
     Fp1, Fc1, Fp2, Fc2 : float64 scalars, antenna pattern values.
@@ -610,15 +853,102 @@ def ln_likelihood_general_fixed_sky_prealigned(dataH, dataL, params, gmst,
     )
 
 
+def ln_likelihood_general_hlv_prealigned(data1, data2, data3, params, L1, L2, L3,
+                                          qnm_table, modes,
+                                          Fp1, Fc1, Fp2, Fc2, Fp3, Fc3,
+                                          swsh_p, swsh_m,
+                                          T, srate, t0,
+                                          skip_hierarchy=False):
+    """
+    Same as ln_likelihood_general_prealigned(), for three detectors
+    (H1, L1, V1), each pre-sliced at its own true arrival time.
+    """
+    params = jnp.asarray(params, dtype=jnp.float64)
+    M, chi = params[0], params[1]
+    prefactor_r = 1.0 / (2.0 * jnp.pi * M * MTSUN)
+    prefactor_i = 1.0 / (M * MTSUN)
+
+    N  = Ntime(srate, T)
+    dt = jnp.asarray(1.0 / srate, dtype=jnp.float64)
+    t  = jnp.arange(N, dtype=jnp.float64) * dt
+
+    waveform1 = jnp.zeros(N, dtype=jnp.float64)
+    waveform2 = jnp.zeros(N, dtype=jnp.float64)
+    waveform3 = jnp.zeros(N, dtype=jnp.float64)
+
+    for j, (l, m, n) in enumerate(modes):
+        omega_r_fn, omega_i_fn = qnm_table[(l, m, n)]
+        f     = prefactor_r * omega_r_fn(chi)
+        gamma = -prefactor_i * omega_i_fn(chi)          # positive: omega_i < 0 in data files
+        A     = params[2 + 2*j] * jnp.exp(1j * params[3 + 2*j]) * reference_amplitude
+
+        waveform1 += h_lm(t + t0, f, gamma, A, Fp1, Fc1, swsh_p[j], swsh_m[j], l)
+        waveform2 += h_lm(t + t0, f, gamma, A, Fp2, Fc2, swsh_p[j], swsh_m[j], l)
+        waveform3 += h_lm(t + t0, f, gamma, A, Fp3, Fc3, swsh_p[j], swsh_m[j], l)
+
+    logl = jnp.asarray(0.0, dtype=jnp.float64)
+    for data_i, L_i, waveform_i in ((data1, L1, waveform1), (data2, L2, waveform2), (data3, L3, waveform3)):
+        y_i  = jax.scipy.linalg.solve_triangular(L_i, jnp.asarray(waveform_i - data_i), lower=True)
+        logl = logl - 0.5 * jnp.vdot(y_i, y_i).real
+
+    if not skip_hierarchy:
+        logl = logl + _amplitude_hierarchy_log_constraint(params, modes)
+
+    return logl
+
+
+def ln_likelihood_general_fixed_sky_hlv_prealigned(dataH, dataL, dataV, params, gmst,
+                                                    L_H, L_L, L_V, qnm_table, modes, swsh_fn,
+                                                    ra, dec,
+                                                    T, srate, t0,
+                                                    skip_hierarchy=False):
+    """
+    Same as ln_likelihood_general_fixed_sky_prealigned(), for three detectors
+    (H1, L1, V1), each pre-sliced at its own true arrival time.
+    """
+    n_modes = len(modes)
+    p0      = params[:2 + 2*n_modes]
+    cosiota, psi = params[2 + 2*n_modes], params[3 + 2*n_modes]
+
+    iota = jnp.arccos(cosiota)
+
+    FpH, FcH, FpL, FcL, FpV, FcV = patterns_for_params_hlv(ra, dec, psi, gmst)
+
+    swsh_p = jnp.stack([swsh_fn(l,  m, iota) for l, m, n in modes])
+    swsh_m = jnp.stack([swsh_fn(l, -m, iota) for l, m, n in modes])
+
+    return ln_likelihood_general_hlv_prealigned(
+        dataH, dataL, dataV, p0, L_H, L_L, L_V,
+        qnm_table, modes,
+        FpH, FcH, FpL, FcL, FpV, FcV,
+        swsh_p, swsh_m,
+        T, srate, t0,
+        skip_hierarchy=skip_hierarchy,
+    )
+
+
 # ─── JIT-compiled versions ────────────────────────────────────────────────────
+
 
 ln_likelihood_general_full_jit = jax.jit(
     ln_likelihood_general_full,
     static_argnames=('gmst', 'qnm_table', 'modes', 'swsh_fn', 'T', 'srate', 'ref_det', 'skip_hierarchy'),
 )
 
+
+ln_likelihood_general_full_hlv_jit = jax.jit(
+    ln_likelihood_general_full_hlv,
+    static_argnames=('gmst', 'qnm_table', 'modes', 'swsh_fn', 'T', 'srate', 'ref_det', 'skip_hierarchy'),
+)
+
+
 ln_likelihood_general_fixed_sky_prealigned_jit = jax.jit(
     ln_likelihood_general_fixed_sky_prealigned,
     static_argnames=('gmst', 'ra', 'dec', 'qnm_table', 'modes', 'swsh_fn', 'T', 'srate', 'skip_hierarchy'),
 )
 
+
+ln_likelihood_general_fixed_sky_hlv_prealigned_jit = jax.jit(
+    ln_likelihood_general_fixed_sky_hlv_prealigned,
+    static_argnames=('gmst', 'ra', 'dec', 'qnm_table', 'modes', 'swsh_fn', 'T', 'srate', 'skip_hierarchy'),
+)

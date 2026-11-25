@@ -1,7 +1,7 @@
 import jax, jax.numpy as jnp
 import numpy as onp
 import scipy.signal as sig
-from scipy.linalg import solve_triangular, cholesky, toeplitz
+from scipy.linalg import cholesky, toeplitz
 
 jax.config.update("jax_enable_x64", True) #double precision
 
@@ -145,45 +145,10 @@ def analysis_data(data, times, tstart, n_analyze):
         raise ValueError(f"analysis window of {n_analyze} samples from index {tstart_idx} exceeds the data ({len(times)} samples)")
     return times[tstart_idx : tstart_idx + n_analyze], data[tstart_idx : tstart_idx + n_analyze]
 
-def interp1d_jax(xp, fp):
-    xp = jnp.asarray(xp,dtype=jnp.float64); fp = jnp.asarray(fp,dtype=jnp.float64)
-    def _interp(x):
-        x = jnp.asarray(x,dtype=jnp.float64)
-        idx = jnp.searchsorted(xp, x, side="right")
-        idx = jnp.clip(idx, 1, xp.size - 1)  # extrapolate using end segments
-        x0 = xp[idx - 1]; x1 = xp[idx]
-        y0 = fp[idx - 1]; y1 = fp[idx]
-        w = (x - x0) / (x1 - x0)
-        return y0 * (1.0 - w) + y1 * w
-    return _interp
-
-def load_tables(qnm1_path, qnm2_path):
-    # ligo_psdH  = onp.genfromtxt(psd_H_path, delimiter='')
-    # ligo_psdL  = onp.genfromtxt(psd_L_path, delimiter='')
-    # psdH = interp1d_jax(jnp.asarray(ligo_psdH[:,0],dtype=jnp.float64), jnp.asarray(ligo_psdH[:,1],dtype=jnp.float64))
-    # psdL = interp1d_jax(jnp.asarray(ligo_psdL[:,0],dtype=jnp.float64), jnp.asarray(ligo_psdL[:,1],dtype=jnp.float64))
-
-    berti_fit_data = onp.genfromtxt(qnm1_path)
-    omega_r = interp1d_jax(jnp.asarray(berti_fit_data[:,0],dtype=jnp.float64), jnp.asarray(berti_fit_data[:,1],dtype=jnp.float64))
-    omega_i = interp1d_jax(jnp.asarray(berti_fit_data[:,0],dtype=jnp.float64), jnp.asarray(berti_fit_data[:,2],dtype=jnp.float64))
-
-    berti_fit_data_OT = onp.genfromtxt(qnm2_path)
-    omega_OT_r = interp1d_jax(jnp.asarray(berti_fit_data_OT[:,0],dtype=jnp.float64), jnp.asarray(berti_fit_data_OT[:,1],dtype=jnp.float64))
-    omega_OT_i = interp1d_jax(jnp.asarray(berti_fit_data_OT[:,0],dtype=jnp.float64), jnp.asarray(berti_fit_data_OT[:,2],dtype=jnp.float64))
-
-    return omega_r, omega_i, omega_OT_r, omega_OT_i
-
-
-def calculate_SNR(h_t_, L_):
-    y_ = solve_triangular(L_, h_t_, lower=True)
-    snr_ = onp.sqrt(onp.dot(y_, y_))
-    return snr_
-
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Noise covariance from the time-domain ACF of a long conditioned stretch
-# (td_acf, cholesky_from_acf, offsource_whitening_check, format_whitening_check:
-# from the psd-filter-correction branch)
+# (td_acf, cholesky_from_acf)
 #
 # The covariance of an analysis segment of N samples only needs the ACF at
 # lags < N dt (0.2 s). Estimating it directly in the time domain from a long
@@ -222,83 +187,6 @@ def td_acf(x, n_lags, taper=0.1):
 def cholesky_from_acf(rho):
     """lower Cholesky factor of the Toeplitz covariance built from the ACF `rho`"""
     return jnp.asarray(cholesky(toeplitz(onp.asarray(rho, dtype=float)), lower=True))
-
-
-def offsource_whitening_check(times, data, L, t_exclude, n_analyze, pad_pre=0.5, pad_post=0.1,
-                              side="post", stride=None, band_edges=None, max_segments=1000):
-    """
-    Whiten off-source segments of the conditioned data with the Cholesky
-    factor L (as the likelihood does) and compare with white unit-variance noise.
-
-    If L describes the noise of `data`, the whitened samples have unit variance
-    and their periodogram |rfft(y)|^2 / N has expectation 1 in every bin. The
-    total variance is insensitive to a mismatch confined to a few low-frequency
-    bins (they are ~1% of the modes), so the periodogram is also averaged over
-    frequency bands (`band_edges`, Hz; default [0, 20, 40, 100, 300, 1000, Nyquist]).
-
-    Segments of n_analyze samples are taken, with a step of `stride` samples
-    (default n_analyze // 2, i.e. 50% overlap), from the data AFTER the analysis
-    window (side="post") and/or BEFORE it (side="pre"; close to the merger it
-    may contain the inspiral). The analysis window [t_exclude, t_exclude +
-    n_analyze*dt] is widened by pad_pre before and pad_post after. Uniform
-    sampling is assumed (dt from the first two samples).
-
-    Returns dict(n_segments, var_mean, var_scatter, band_edges, band_power, acf1):
-    var_scatter is the standard deviation of the per-segment variance (its
-    expected value for white noise is sqrt(2/n_analyze) ~ 0.05 for 820 samples),
-    not a standard error; band_power is the mean whitened periodogram per band.
-    """
-    times = onp.asarray(times, dtype=float); data = onp.asarray(data, dtype=float)
-    if len(times) != len(data):
-        raise ValueError(f"times and data have different lengths ({len(times)} vs {len(data)})")
-    L = onp.asarray(L, dtype=float)
-    n = int(n_analyze)
-    stride = int(stride) if stride else max(n // 2, 1)
-    dt = times[1] - times[0]
-    nyq = 0.5 / dt
-    T_an = n * dt
-    lo, hi = t_exclude - pad_pre, t_exclude + T_an + pad_post
-    if band_edges is None:
-        band_edges = [0.0, 20.0, 40.0, 100.0, 300.0, 1000.0, nyq]
-    band_edges = [float(b) for b in band_edges]
-    freqs = onp.fft.rfftfreq(n, d=dt)
-
-    var, acf1, pgrams = [], [], []
-    for i0 in range(0, len(data) - n + 1, stride):
-        t_a, t_b = times[i0], times[i0 + n - 1]
-        pre = t_b < lo
-        post = t_a > hi
-        if not ((side in ("pre", "both") and pre) or (side in ("post", "both") and post)):
-            continue
-        y = solve_triangular(L, data[i0:i0 + n], lower=True)
-        var.append(onp.mean(y ** 2))
-        y0 = y - y.mean()
-        acf1.append(onp.dot(y0[:-1], y0[1:]) / onp.dot(y0, y0))
-        pgrams.append(onp.abs(onp.fft.rfft(y)) ** 2 / n)
-        if len(var) >= max_segments:
-            break
-    nseg = len(var)
-    if nseg == 0:
-        return dict(n_segments=0, var_mean=onp.nan, var_scatter=onp.nan, band_edges=band_edges,
-                    band_power=[onp.nan] * (len(band_edges) - 1), acf1=onp.nan)
-    P = onp.mean(onp.asarray(pgrams), axis=0)
-    band_power = []
-    for a, b in zip(band_edges[:-1], band_edges[1:]):
-        m = (freqs >= a) & (freqs < b) if b < nyq else (freqs >= a) & (freqs <= b)
-        band_power.append(float(onp.mean(P[m])) if onp.any(m) else onp.nan)
-    return dict(n_segments=nseg, var_mean=float(onp.mean(var)), var_scatter=float(onp.std(var)),
-                band_edges=band_edges, band_power=band_power, acf1=float(onp.mean(acf1)))
-
-
-def format_whitening_check(chk):
-    """one-line summary of offsource_whitening_check() for the log"""
-    if chk["n_segments"] == 0:
-        return "no off-source segment available"
-    edges = chk["band_edges"]
-    bands = "|".join(f"{a:.0f}-{b:.0f}" for a, b in zip(edges[:-1], edges[1:]))
-    power = " ".join(f"{p:.2f}" for p in chk["band_power"])
-    return (f"{chk['n_segments']} segments, var = {chk['var_mean']:.3f} (scatter {chk['var_scatter']:.3f}), "
-            f"acf1 = {chk['acf1']:+.3f}, whitened power per band [{bands} Hz] = {power} (expected 1)")
 
 
 # ──────────────────────────────────────────────────────────────────────────────

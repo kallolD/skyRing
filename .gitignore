@@ -6,3 +6,7 @@ venv/
 env/
 .ipynb_checkpoints/
 .DS_Store
+examples/plots/
+strain_cache/
+examples/strain_cache/
+.pytest_cache/

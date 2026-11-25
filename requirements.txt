@@ -11,3 +11,4 @@ scipy==1.15.3
 tomli==2.4.0
 seaborn==0.13.2
 jaxns==2.6.9
+pytest==9.1.1        # tests only

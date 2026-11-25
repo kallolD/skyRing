@@ -1,34 +1,66 @@
 # skyRing
-This repository contains code for estimating the sky location of sources, in addition to all other relevant parameters, directly from the ringdown gravitational-wave signal, without fixing the location to point estimates obtained from inspiral–merger–ringdown (IMR) analyses. We present three approaches: the standard Fixed-sky method, along with two alternatives that avoid relying on fixed point estimates — Full-sky and Informed-sky. See (arXiv: [link when available]) for more details.
 
-# Installation
-Install dependencies using 
+Code for ringdown analyses that estimate the sky location of the source together with all other parameters, directly
+from the ringdown signal, instead of fixing it to point estimates from inspiral–merger–ringdown (IMR) analyses.
+See *Impact of sky localization uncertainty on ringdown inference* (K. Dey, E. Barausse, M. Crisostomi, R. Trotta)
+for details.
+
+Three approaches are implemented:
+1. **Full-sky:** the sky position is sampled with an isotropic prior. All detectors are analysed from the arrival
+   time at the last detector, and the other detectors' templates are shifted by the sky-dependent delay.
+2. **Fixed-sky:** the sky position is fixed to an IMR point estimate, and each detector is analysed from its own
+   arrival time.
+3. **Informed-sky:** the Full-sky likelihood is averaged over samples of the IMR sky posterior, which act as the sky
+   prior.
+
+This `dev` branch holds the code of the revised version of the paper. It uses a noise covariance from the
+time-domain autocorrelation of off-source data, applies no high-pass filter, and gives Informed-sky equal-weight IMR
+sky samples. The `main` branch keeps the version of the first submission.
+
+## Contents
+- `src/analysis.py`: the setup of the paper's runs, without configuration files:
+  - GWOSC strain, conditioning and analysis windows;
+  - noise covariance;
+  - Full-sky, Fixed-sky and Informed-sky likelihoods and their prior boxes;
+  - nested sampling.
+- `src/waveform.py`: quasinormal-mode templates for any set of (l, m, n) modes, antenna patterns, inter-detector
+  delays, likelihoods, and optional detector-frame sky coordinates.
+- `src/other_utils.py`: data conditioning, time-domain autocorrelation and Cholesky factor, whitening check.
+- `src/swsh.py`: spin-weighted spherical harmonics. `src/strain_cache.py`: GWOSC download with a local cache.
+- `src/plot_utils.py`: the paper's plots.
+- `examples/plots.ipynb`: reproduces the figures of the paper, and the Bayes factors and posterior-volume ratios it
+  quotes, from the data on Zenodo.
+- `examples/analysis.ipynb`: how to run Full-sky, Fixed-sky and Informed-sky analyses.
+- `tests/smoke_test.py`: checks the likelihoods against the paper's runs, a short sampler run, and `plots.ipynb`.
+- `data/`: QNM frequency tables (l = 2, 3) and the PSDs of the ringdown-only injections.
+
+## Installation
 ```bash
 pip install -r requirements.txt
-``` 
-(preferably in a fresh python environment)
-
-
-# To reproduce plots from the paper
-Samples from PE runs for GW250114 and GW190521 are already available at zenodo ([10.5281/zenodo.20089761](https://doi.org/10.5281/zenodo.20089761))
-To reproduce the plots from the paper, download the zenodo data and use the `examples/plots.ipynb` jupyter notebook to plot the results.
-
-# Using the code
-Examples are provided in the examples directory in the form of jupyter notebooks.
-We provide three approaches to study ringdown
-1. Full-sky: Sky location is sampled from a uniform distritbution.
-2. Fixed-sky: Sky location is fixed to a `best estimate' from a prior inspiral-merger-ringdown analysis.
-3. Informed-sky: Sky location is sampled using posteriors from a previous inspiral-merger-ringdown analysis as the prior.
-
-The analyses using the three approaches are presented in separate directories.
-
-We analyze GW250114 and GW190521; jupyter notebooks for the same can be found in the respective directories.
-For instance, the full-sky analysis for GW250114 is presented in `examples/full-sky/GW250114.ipynb`.
-
-These notebooks were tested on macOS. You can tune CPU multi-threading performance by modifying the environment flags at the start of each notebook.
-
-```python
-os.environ["JAX_PLATFORM_NAME"] = "cpu"
-os.environ["XLA_FLAGS"] = "--xla_force_host_platform_device_count=12"
 ```
+Use a fresh Python 3.12 environment. The plots render text with LaTeX, so a LaTeX installation is needed.
 
+## Reproducing the figures of the paper
+1. Download `posterior_files.zip` from Zenodo, [10.5281/zenodo.20089761](https://doi.org/10.5281/zenodo.20089761).
+   Use version 3 or later; earlier versions hold the data of the first submission.
+2. Unzip it, and point `SKYRING_DATA` to the `posterior_files` folder, or edit `DATA` in the notebook.
+3. Run `examples/plots.ipynb`. The figures are written to `examples/plots/`.
+
+## Running an analysis
+```python
+import os
+os.environ["XLA_FLAGS"] = "--xla_force_host_platform_device_count=12"   # CPU devices, before importing jax
+import analysis as an                                                     # with src/ on sys.path
+
+setup = an.setup_event("GW250114", sky="full")             # downloads and caches the GWOSC strain
+modes = ((2, 2, 0), (2, 2, 1))
+names, low, high = an.prior_box(setup, modes)
+result = an.run_nested(an.make_loglik(setup, modes), low, high, nlive=10_000)
+```
+See `examples/analysis.ipynb` for Fixed-sky, Informed-sky, GW190521, later start times and detector-frame sky
+coordinates. With 10^4 live points, a Full-sky run takes about 35 minutes on a laptop (Apple M4).
+
+## Tests
+```bash
+SKYRING_DATA=/path/to/posterior_files pytest -q tests/smoke_test.py
+```

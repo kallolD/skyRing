@@ -18,7 +18,7 @@ time-domain autocorrelation of off-source data, applies no high-pass filter, and
 sky samples. The `main` branch keeps the version of the first submission.
 
 ## Contents
-- `src/analysis.py`: the setup of the paper's runs, without configuration files:
+- `src/analysis.py`: 
   - GWOSC strain, conditioning and analysis windows, for H1-L1 or H1-L1-V1;
   - noise covariance;
   - Full-sky, Fixed-sky and Informed-sky likelihoods and their prior boxes, in equatorial or detector-frame sky
